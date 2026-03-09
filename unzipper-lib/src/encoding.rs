@@ -7,9 +7,10 @@ use ::core::{
 use ::std::{borrow::Cow, rc::Rc, sync::Arc};
 
 /// Encoding to use when unzipping.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Encoding {
     /// Determine encoding by content.
+    #[default]
     Auto,
     /// Use specified encoding.
     Set(&'static ::encoding_rs::Encoding),
@@ -106,4 +107,3 @@ impl TryFrom<&[u8]> for Encoding {
         }
     }
 }
-

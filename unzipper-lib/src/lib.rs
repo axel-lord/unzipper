@@ -2,6 +2,7 @@
 
 mod encoding;
 
+use ::core::num::NonZero;
 use ::std::{fs::File, io::BufReader, path::Path, sync::Arc};
 
 use ::parking_lot::Mutex;
@@ -14,8 +15,8 @@ pub use self::encoding::{Encoding, EncodingFromStrError};
 pub struct Unzipper {
     /// Encoding of filenames.
     pub encoding: Encoding,
-    /// Additional threads to use.
-    pub threads: usize,
+    /// Threads to use.
+    pub threads: NonZero<usize>,
     /// Should common path prefix be removed.
     pub unfold: bool,
 }
@@ -38,7 +39,7 @@ impl Unzipper {
         let archive = ZipArchive::new(BufReader::new(&file))?;
         let metadata = archive.metadata();
 
-        let thread_archives = (0..*threads)
+        let thread_archives = (0..threads.get())
             .filter_map(|_| {
                 let file = file
                     .try_clone()

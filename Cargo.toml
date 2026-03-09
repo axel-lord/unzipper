@@ -48,4 +48,6 @@ rayon = "1.11.0"
 tap = "1.0.1"
 thiserror = "2.0.18"
 zip = "8.2.0"
+memmap2 = "0.9.10"
+parking_lot = "0.12.5"
 

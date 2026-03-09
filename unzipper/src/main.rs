@@ -1,14 +1,19 @@
 //! Implementation of cli tool.
 
+use ::core::num::NonZero;
 use ::std::{
+    fmt::format,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    thread::available_parallelism,
 };
 
 use ::clap::{CommandFactory, Parser};
 use ::clap_complete::{Generator, Shell};
 use ::log::LevelFilter;
 use ::mimalloc::MiMalloc;
+use ::rayon::ThreadPoolBuilder;
+use ::unzipper_lib::Unzipper;
 
 use crate::encoding::{ENCODING_NAMES, Encoding};
 
@@ -31,6 +36,11 @@ fn binary_name() -> String {
         .unwrap_or_else(|| env!("CARGO_BIN_NAME").to_owned())
 }
 
+/// Get default thread count.
+fn thread_count() -> NonZero<usize> {
+    available_parallelism().unwrap_or(const { NonZero::new(1).unwrap() })
+}
+
 /// Unzip files, with encoding detection.
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, long_about = None)]
@@ -47,6 +57,10 @@ struct Cli {
     /// without a destination while at the given location.
     #[arg(long, requires = "archive")]
     at: Option<PathBuf>,
+
+    /// How many threads should be used.
+    #[arg(long, short, default_value_t = thread_count())]
+    threads: NonZero<usize>,
 
     /// Directory to unpack contents into, will be created if missing.
     #[arg(long, short = 'd', conflicts_with = "at", requires = "archive")]
@@ -72,13 +86,14 @@ struct Cli {
 fn main() -> ::color_eyre::Result<()> {
     let Cli {
         verbose,
-        encoding,
+        encoding: Encoding(encoding),
         list_encodings,
         completions,
         shell,
         at,
         exdir,
         archive,
+        threads,
     } = Cli::parse();
     ::color_eyre::install()?;
     let level_filter = if verbose {
@@ -104,7 +119,21 @@ fn main() -> ::color_eyre::Result<()> {
         ::clap_complete::generate(shell, &mut Cli::command(), binary_name(), &mut stdout);
         stdout.flush().expect("flush of stdout should succeed");
     } else {
-        todo!()
+        ThreadPoolBuilder::new()
+            .thread_name(|idx| format!("unzipper-worker-{idx}"))
+            .num_threads(threads.get())
+            .build_global()?;
+        let unzipper = Unzipper::builder()
+            .encoding(encoding)
+            .threads(threads)
+            .unfold(false)
+            .build();
+
+        for archive in archive {
+            if let Err(err) = unzipper.unzip(&archive, Path::new("")) {
+                ::log::error!("could not unzip {archive:?}\n{err}");
+            };
+        }
     }
 
     Ok(())

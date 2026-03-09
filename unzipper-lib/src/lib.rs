@@ -171,7 +171,14 @@ impl Unzipper {
                 if err_indices.contains(&index) {
                     continue;
                 }
-                handle_file(&mut archive, index, encoding, src, dest, password.as_deref());
+                handle_file(
+                    &mut archive,
+                    index,
+                    encoding,
+                    src,
+                    dest,
+                    password.as_deref(),
+                );
             }
         });
 

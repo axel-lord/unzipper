@@ -16,12 +16,19 @@ pub enum Encoding {
     Set(&'static ::encoding_rs::Encoding),
 }
 
+impl Encoding {
+    /// Get a string repr of self, either encoder name or auto.
+    pub fn as_str<'a>(&self) -> &'a str {
+        match self {
+            Encoding::Auto => "auto",
+            Encoding::Set(encoding) => encoding.name(),
+        }
+    }
+}
+
 impl Display for Encoding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Encoding::Auto => f.write_str("auto"),
-            Encoding::Set(encoding) => f.write_str(encoding.name()),
-        }
+        f.write_str(self.as_str())
     }
 }
 

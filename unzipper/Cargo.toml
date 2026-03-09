@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-clap = { workspace = true, features = ["derive"] }
+clap = { workspace = true, features = ["derive", "string"] }
 clap_complete.workspace = true
 color-eyre.workspace = true
 encoding_rs.workspace = true

@@ -1,73 +1,34 @@
 //! Implementation of cli tool.
 
-use ::std::io::{self, Write};
+use ::std::{
+    io::{self, Write},
+    path::PathBuf,
+};
 
-use ::clap::Parser;
+use ::clap::{CommandFactory, Parser};
+use ::clap_complete::{Generator, Shell};
 use ::log::LevelFilter;
 use ::mimalloc::MiMalloc;
 
-use crate::encoding::ENCODING_NAMES;
+use crate::encoding::{ENCODING_NAMES, Encoding};
 
 /// Global allocator is mimalloc
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-mod encoding {
-    //! Encoding cli help.
+mod encoding;
 
-    use ::std::{collections::BTreeSet, sync::LazyLock};
+/// Get default shell
+fn default_shell() -> Shell {
+    Shell::from_env().unwrap_or(Shell::Bash)
+}
 
-    use ::encoding_rs::{
-        BIG5, EUC_JP, EUC_KR, GB18030, GBK, IBM866, ISO_2022_JP, ISO_8859_2, ISO_8859_3,
-        ISO_8859_4, ISO_8859_5, ISO_8859_6, ISO_8859_7, ISO_8859_8, ISO_8859_8_I, ISO_8859_10,
-        ISO_8859_13, ISO_8859_14, ISO_8859_15, ISO_8859_16, KOI8_R, KOI8_U, MACINTOSH, SHIFT_JIS,
-        UTF_8, WINDOWS_874, WINDOWS_1250, WINDOWS_1251, WINDOWS_1252, WINDOWS_1253, WINDOWS_1254,
-        WINDOWS_1255, WINDOWS_1256, WINDOWS_1257, WINDOWS_1258, X_MAC_CYRILLIC,
-    };
-
-    /// Encodings used for command completion.
-    static ENCODINGS: &[&::encoding_rs::Encoding] = &[
-        BIG5,
-        EUC_JP,
-        EUC_KR,
-        GB18030,
-        GBK,
-        IBM866,
-        ISO_2022_JP,
-        ISO_8859_2,
-        ISO_8859_3,
-        ISO_8859_4,
-        ISO_8859_5,
-        ISO_8859_6,
-        ISO_8859_7,
-        ISO_8859_8,
-        ISO_8859_8_I,
-        ISO_8859_10,
-        ISO_8859_13,
-        ISO_8859_14,
-        ISO_8859_15,
-        ISO_8859_16,
-        KOI8_R,
-        KOI8_U,
-        MACINTOSH,
-        SHIFT_JIS,
-        UTF_8,
-        WINDOWS_874,
-        WINDOWS_1250,
-        WINDOWS_1251,
-        WINDOWS_1252,
-        WINDOWS_1253,
-        WINDOWS_1254,
-        WINDOWS_1255,
-        WINDOWS_1256,
-        WINDOWS_1257,
-        WINDOWS_1258,
-        X_MAC_CYRILLIC,
-    ];
-
-    /// Names of available encodings.
-    pub static ENCODING_NAMES: LazyLock<BTreeSet<&'static str>> =
-        LazyLock::new(|| ENCODINGS.iter().map(|enc| enc.name()).collect());
+/// Get name of binary.
+fn binary_name() -> String {
+    ::std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.to_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| env!("CARGO_BIN_NAME").to_owned())
 }
 
 /// Unzip files, with encoding detection.
@@ -77,28 +38,73 @@ struct Cli {
     /// Enable verbose logging.
     #[arg(long, short)]
     verbose: bool,
+
+    /// Encoding of file names.
+    #[arg(long, short = 'O', hide_possible_values = true, default_value = "auto")]
+    encoding: Encoding,
+
+    /// Where to unpack contents, unlike with '-d' this has the same behaviour as running
+    /// without a destination while at the given location.
+    #[arg(long, requires = "archive")]
+    at: Option<PathBuf>,
+
+    /// Directory to unpack contents into, will be created if missing.
+    #[arg(long, short = 'd', conflicts_with = "at", requires = "archive")]
+    exdir: Option<PathBuf>,
+
+    /// List available encodings.
+    #[arg(long, exclusive = true)]
+    list_encodings: bool,
+
+    /// Generate completions.
+    #[arg(long, conflicts_with_all = ["at", "exdir", "archive"])]
+    completions: bool,
+
+    /// Shell to use if generating completions.
+    #[arg(long, requires = "completions", value_enum, default_value_t = default_shell())]
+    shell: Shell,
+
+    /// Archive/s to unpack.
+    #[arg(required = false)]
+    archive: Vec<PathBuf>,
 }
 
 fn main() -> ::color_eyre::Result<()> {
-    let Cli { verbose } = Cli::parse();
+    let Cli {
+        verbose,
+        encoding,
+        list_encodings,
+        completions,
+        shell,
+        at,
+        exdir,
+        archive,
+    } = Cli::parse();
     ::color_eyre::install()?;
+    let level_filter = if verbose {
+        LevelFilter::Info
+    } else {
+        LevelFilter::Warn
+    };
     ::env_logger::builder()
-        .filter_module(
-            "unzipper_lib",
-            if verbose {
-                LevelFilter::Info
-            } else {
-                LevelFilter::Warn
-            },
-        )
+        .filter_module("unzipper", level_filter)
+        .filter_module("unzipper_lib", level_filter)
         .init();
 
-    let mut stdout = io::stdout().lock();
-    for i in ENCODING_NAMES.iter() {
-        stdout
-            .write_all(i.as_bytes())
-            .and_then(|_| stdout.write_all(b"\n"))
-            .expect("write to stdout should succeed");
+    if list_encodings {
+        let mut stdout = io::stdout().lock();
+        for i in ENCODING_NAMES.iter() {
+            stdout
+                .write_all(i.as_bytes())
+                .and_then(|_| stdout.write_all(b"\n"))
+                .expect("write to stdout should succeed");
+        }
+    } else if completions {
+        let mut stdout = io::stdout().lock();
+        ::clap_complete::generate(shell, &mut Cli::command(), binary_name(), &mut stdout);
+        stdout.flush().expect("flush of stdout should succeed");
+    } else {
+        todo!()
     }
 
     Ok(())

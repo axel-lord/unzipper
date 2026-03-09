@@ -1,0 +1,19 @@
+[package]
+name = "unzipper-lib"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+bon.workspace = true
+chardetng.workspace = true
+encoding_rs.workspace = true
+log.workspace = true
+rayon.workspace = true
+tap.workspace = true
+thiserror.workspace = true
+zip.workspace = true
+
+[lints]
+workspace = true

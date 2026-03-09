@@ -1,32 +1,37 @@
 //! Library used to unzip zip content.
 
-mod cloner;
 mod encoding;
 
 use ::core::{
-    iter,
+    fmt::{self, Debug},
+    iter::{self, FusedIterator},
     num::NonZero,
     sync::atomic::{self, AtomicUsize},
 };
 use ::std::{
+    collections::BTreeSet,
     fs::File,
-    io::{BufReader, Cursor},
-    path::{Path, PathBuf},
+    io::{BufWriter, Cursor, Write},
+    path::{Component, Path},
     sync::Arc,
 };
 
 use ::chardetng::EncodingDetector;
 use ::memmap2::Mmap;
-use ::parking_lot::Mutex;
-use ::rayon::iter::{
-    IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
-};
+use ::rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use ::tap::Conv;
 use ::zip::ZipArchive;
 
-use crate::cloner::fallible_cloner;
-
 pub use self::encoding::{Encoding, EncodingFromStrError};
+
+/// Get an iterator grabbing values from an atomic counter.
+fn grab_counter(counter: &AtomicUsize, len: usize) -> impl FusedIterator<Item = usize> {
+    iter::from_fn(move || {
+        let idx = counter.fetch_add(1, atomic::Ordering::Relaxed);
+        if idx < len { Some(idx) } else { None }
+    })
+    .fuse()
+}
 
 /// Errors returned by attempts to unzip files.
 #[derive(Debug, ::thiserror::Error)]
@@ -42,6 +47,24 @@ pub enum UnzipError {
     ReadZip(::zip::result::ZipError),
 }
 
+/// Destination to 'extract' files to.
+#[derive(Clone, Copy)]
+pub enum Destination<'lt> {
+    /// Extract into the given directory.
+    Exdir(&'lt Path),
+    /// List filenames by printing lines to given writer.
+    List(&'lt (dyn Sync + for<'a> Fn(&'a Path))),
+}
+
+impl Debug for Destination<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exdir(path) => f.debug_tuple("Exdir").field(path).finish(),
+            Self::List(..) => f.debug_tuple("List").finish_non_exhaustive(),
+        }
+    }
+}
+
 /// Unzipper configuration.
 #[derive(Debug, Clone, ::bon::Builder)]
 pub struct Unzipper {
@@ -49,8 +72,6 @@ pub struct Unzipper {
     pub encoding: Encoding,
     /// Threads to use.
     pub threads: NonZero<usize>,
-    /// Should common path prefix be removed.
-    pub unfold: bool,
     /// Password to use for files.
     pub password: Option<Vec<u8>>,
 }
@@ -62,11 +83,10 @@ impl Unzipper {
     /// On io errors related to reading src.
     /// Or if src is not a zip file / is malformed.
     /// Or if dest cannot be created / cannot be written to.
-    pub fn unzip(&self, src: &Path, dest: &Path) -> Result<(), UnzipError> {
+    pub fn unzip(&self, src: &Path, dest: Destination<'_>) -> Result<(), UnzipError> {
         let Self {
             encoding,
             threads,
-            unfold,
             password,
         } = self;
 
@@ -103,35 +123,31 @@ impl Unzipper {
         let _ = metadata;
         let len = len;
 
-        let counter = AtomicUsize::new(0);
-        let items = archives
-            .par_iter_mut()
-            .flat_map_iter(|archive| {
-                iter::from_fn(|| {
-                    let idx = counter.fetch_add(1, atomic::Ordering::Relaxed);
-                    if idx < len { Some(idx) } else { None }
-                })
-                .fuse()
-                .filter_map(|index| {
-                    let name = archive
-                        .by_index_raw(index)
-                        .map_err(|err| {
-                            ::log::warn!("could not get file with index {index} in {src:?}\n{err}")
-                        })
-                        .ok()?
-                        .name_raw()
-                        .conv::<Vec<u8>>();
-
-                    Some((index, name))
-                })
-            })
-            .collect::<Vec<_>>();
-
+        let mut err_indices = BTreeSet::new();
         let encoding = match encoding {
             Encoding::Auto => {
+                let counter = AtomicUsize::new(0);
+                let items =
+                    archives
+                        .par_iter_mut()
+                        .flat_map_iter(|archive| {
+                            grab_counter(&counter, len).map(|index| {
+                                archive
+                        .by_index_raw(index)
+                        .map_err(|err| {
+                            ::log::warn!("could not get file with index {index} in {src:?}\n{err}");
+                            index
+                        })
+                        .map(|zip_file| zip_file.name_raw().conv::<Vec<u8>>())
+                            })
+                        })
+                        .collect::<Vec<_>>();
                 let mut detector = EncodingDetector::new();
-                for (_, name) in &items {
-                    detector.feed(name, false);
+                for item in items {
+                    match item {
+                        Ok(name) => detector.feed(&name, false),
+                        Err(idx) => err_indices.insert(idx),
+                    };
                 }
                 detector.feed(b"", true);
                 let (encoding, confident) = detector.guess_assess(None, true);
@@ -149,19 +165,106 @@ impl Unzipper {
             }
         };
 
-        let stack = Mutex::new(items);
+        let counter = AtomicUsize::new(0);
         archives.into_par_iter().for_each(|mut archive| {
-            loop {
-                let item = stack.lock().pop();
-                let Some((index, name)) = item else {
-                    break;
-                };
-
-                let (decoded, has_replaced) = encoding.decode_without_bom_handling(&name);
-                let path = Path::new(&*decoded);
+            for index in grab_counter(&counter, len) {
+                if err_indices.contains(&index) {
+                    continue;
+                }
+                handle_file(&mut archive, index, encoding, src, dest, password.as_deref());
             }
         });
 
         Ok(())
+    }
+}
+
+/// Handle file in archive.
+fn handle_file(
+    archive: &mut ZipArchive<Cursor<&Mmap>>,
+    index: usize,
+    encoding: &'static ::encoding_rs::Encoding,
+    src: &Path,
+    dest: Destination,
+    password: Option<&[u8]>,
+) {
+    let result = if let Some(password) = password {
+        archive.by_index_decrypt(index, password)
+    } else {
+        archive.by_index(index)
+    };
+    let mut zip_file = match result {
+        Ok(file) => file,
+        Err(err) => {
+            ::log::warn!("could not get file with index {index} in {src:?}\n{err}");
+            return;
+        }
+    };
+
+    let (decoded, _has_replaced) = encoding.decode_without_bom_handling(zip_file.name_raw());
+    let path = Path::new(&*decoded);
+    for component in path.components() {
+        if let Component::Prefix(_) | Component::RootDir | Component::ParentDir = component {
+            ::log::warn!("skipping {path:?} in {src:?}, disallowed path component");
+            return;
+        }
+    }
+
+    if zip_file.is_symlink() {
+        ::log::warn!("skipping symlink {path:?} in {src:?}, unsupported");
+        return;
+    }
+
+    if let Destination::List(list) = dest {
+        list(path);
+        return;
+    }
+
+    let exdir = match dest {
+        Destination::Exdir(exdir) => exdir,
+        Destination::List(list) => {
+            list(path);
+            return;
+        }
+    };
+
+    if zip_file.is_dir() {
+        let path = exdir.join(path);
+        if let Err(err) = ::std::fs::create_dir_all(&path) {
+            ::log::error!("could not create {path:?}\n{err}");
+        }
+        return;
+    }
+
+    let mut components = path.components();
+    let file_name = loop {
+        match components.next_back() {
+            None => {
+                ::log::warn!("path {path:?} in {src:?} has no final component");
+                return;
+            }
+            Some(Component::Normal(file_name)) => break file_name,
+            Some(_) => {}
+        }
+    };
+    let prefix = components.as_path();
+
+    let mut path = exdir.join(prefix);
+    if let Err(err) = ::std::fs::create_dir_all(&path) {
+        ::log::error!("could not create {path:?}\n{err}");
+        return;
+    }
+    path.push(file_name);
+
+    let mut file = match ::std::fs::File::create(&path).map(BufWriter::new) {
+        Ok(file) => file,
+        Err(err) => {
+            ::log::error!("could not create {path:?}\n{err}");
+            return;
+        }
+    };
+
+    if let Err(err) = ::std::io::copy(&mut zip_file, &mut file).and_then(|_| file.flush()) {
+        ::log::error!("could not extract to {path:?}\n{err}");
     }
 }

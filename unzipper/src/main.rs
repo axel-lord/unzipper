@@ -2,18 +2,17 @@
 
 use ::core::num::NonZero;
 use ::std::{
-    fmt::format,
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     thread::available_parallelism,
 };
 
 use ::clap::{CommandFactory, Parser};
-use ::clap_complete::{Generator, Shell};
+use ::clap_complete::Shell;
 use ::log::LevelFilter;
 use ::mimalloc::MiMalloc;
 use ::rayon::ThreadPoolBuilder;
-use ::unzipper_lib::Unzipper;
+use ::unzipper_lib::{Destination, Unzipper};
 
 use crate::encoding::{ENCODING_NAMES, Encoding};
 
@@ -90,7 +89,7 @@ fn main() -> ::color_eyre::Result<()> {
         list_encodings,
         completions,
         shell,
-        at,
+        at: _,
         exdir,
         archive,
         threads,
@@ -126,11 +125,19 @@ fn main() -> ::color_eyre::Result<()> {
         let unzipper = Unzipper::builder()
             .encoding(encoding)
             .threads(threads)
-            .unfold(false)
             .build();
 
         for archive in archive {
-            if let Err(err) = unzipper.unzip(&archive, Path::new("")) {
+            if let Err(err) = unzipper.unzip(
+                &archive,
+                if let Some(exdir) = &exdir {
+                    Destination::Exdir(exdir)
+                } else {
+                    Destination::List(&|path| {
+                        _ = writeln!(io::stdout().lock(), "{}", path.display());
+                    })
+                },
+            ) {
                 ::log::error!("could not unzip {archive:?}\n{err}");
             };
         }

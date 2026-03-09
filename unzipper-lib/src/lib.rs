@@ -2,7 +2,10 @@
 
 mod encoding;
 
-use ::std::path::Path;
+use ::std::{fs::File, io::BufReader, path::Path, sync::Arc};
+
+use ::parking_lot::Mutex;
+use ::zip::ZipArchive;
 
 pub use self::encoding::{Encoding, EncodingFromStrError};
 
@@ -30,6 +33,35 @@ impl Unzipper {
             threads,
             unfold,
         } = self;
+
+        let file = File::open(src)?;
+        let archive = ZipArchive::new(BufReader::new(&file))?;
+        let metadata = archive.metadata();
+
+        let thread_archives = (0..*threads)
+            .filter_map(|_| {
+                let file = file
+                    .try_clone()
+                    .inspect_err(|err| {
+                        ::log::warn!("failed to clone file handle of {src:?}\n{err}")
+                    })
+                    .ok()
+                    .map(BufReader::new)?;
+                let meta = Arc::clone(&metadata);
+
+                // SAFETY: Same file as metadata was created for is used.
+                let archive = unsafe { ZipArchive::unsafe_new_with_metadata(file, meta) };
+                Some(archive)
+            })
+            .collect::<Vec<_>>();
+
         Ok(())
     }
+}
+
+/// Archive item.
+#[derive(Debug)]
+struct Item {
+    /// Index of archive item.
+    index: usize,
 }

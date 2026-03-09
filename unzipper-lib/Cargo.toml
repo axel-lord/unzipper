@@ -10,6 +10,7 @@ bon.workspace = true
 chardetng.workspace = true
 encoding_rs.workspace = true
 log.workspace = true
+parking_lot = "0.12.5"
 rayon.workspace = true
 tap.workspace = true
 thiserror.workspace = true

@@ -122,10 +122,7 @@ fn main() -> ::color_eyre::Result<()> {
             .thread_name(|idx| format!("unzipper-worker-{idx}"))
             .num_threads(threads.get())
             .build_global()?;
-        let unzipper = Unzipper::builder()
-            .encoding(encoding)
-            .threads(threads)
-            .build();
+        let unzipper = Unzipper::builder().encoding(encoding).build();
 
         for archive in archive {
             if let Err(err) = unzipper.unzip(

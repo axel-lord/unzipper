@@ -2,36 +2,18 @@
 
 mod encoding;
 
-use ::core::{
-    fmt::{self, Debug},
-    iter::{self, FusedIterator},
-    num::NonZero,
-    sync::atomic::{self, AtomicUsize},
-};
+use ::core::fmt::{self, Debug};
 use ::std::{
-    collections::BTreeSet,
     fs::File,
-    io::{BufWriter, Cursor, Write},
+    io::{BufReader, BufWriter, Write},
     path::{Component, Path},
-    sync::Arc,
 };
 
 use ::chardetng::EncodingDetector;
-use ::memmap2::Mmap;
-use ::rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
-use ::tap::Conv;
+use ::tap::Pipe;
 use ::zip::ZipArchive;
 
 pub use self::encoding::{Encoding, EncodingFromStrError};
-
-/// Get an iterator grabbing values from an atomic counter.
-fn grab_counter(counter: &AtomicUsize, len: usize) -> impl FusedIterator<Item = usize> {
-    iter::from_fn(move || {
-        let idx = counter.fetch_add(1, atomic::Ordering::Relaxed);
-        if idx < len { Some(idx) } else { None }
-    })
-    .fuse()
-}
 
 /// Errors returned by attempts to unzip files.
 #[derive(Debug, ::thiserror::Error)]
@@ -67,16 +49,14 @@ impl Debug for Destination<'_> {
 
 /// Unzipper configuration.
 #[derive(Debug, Clone, ::bon::Builder)]
-pub struct Unzipper {
+pub struct Unzipper<'lt> {
     /// Encoding of filenames.
     pub encoding: Encoding,
-    /// Threads to use.
-    pub threads: NonZero<usize>,
     /// Password to use for files.
-    pub password: Option<Vec<u8>>,
+    pub password: Option<&'lt [u8]>,
 }
 
-impl Unzipper {
+impl<'lt> Unzipper<'lt> {
     /// Unzip src into dest.
     ///
     /// # Errors
@@ -84,70 +64,26 @@ impl Unzipper {
     /// Or if src is not a zip file / is malformed.
     /// Or if dest cannot be created / cannot be written to.
     pub fn unzip(&self, src: &Path, dest: Destination<'_>) -> Result<(), UnzipError> {
-        let Self {
-            encoding,
-            threads,
-            password,
-        } = self;
+        let Self { encoding, password } = self;
 
-        let file = File::open(src).map_err(UnzipError::OpenSrc)?;
-        if let Err(err) = file.try_lock_shared() {
-            ::log::warn!("could not lock {src:?}\n{err}");
-        }
-        let mem_map = unsafe { Mmap::map(&file) }.map_err(UnzipError::Memmap)?;
-        let reader = || Cursor::new(&mem_map);
-
-        let mut metadata = None;
-        let mut len = 0;
-        let mut archives = (0..threads.get())
-            .map(|_| {
-                if let Some(metadata) = &metadata {
-                    let metadata = Arc::clone(metadata);
-                    // SAFETY: Same file as metadata was created for is used.
-                    let archive =
-                        unsafe { ZipArchive::unsafe_new_with_metadata(reader(), metadata) };
-                    Ok(archive)
-                } else {
-                    match ZipArchive::new(reader()) {
-                        Ok(archive) => {
-                            metadata = Some(archive.metadata());
-                            len = archive.len();
-                            Ok(archive)
-                        }
-                        Err(err) => Err(err),
-                    }
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()
+        let mut archive = File::open(src)
+            .map(BufReader::new)
+            .map_err(UnzipError::OpenSrc)?
+            .pipe(ZipArchive::new)
             .map_err(UnzipError::ReadZip)?;
-        let _ = metadata;
-        let len = len;
 
-        let mut err_indices = BTreeSet::new();
         let encoding = match encoding {
             Encoding::Auto => {
-                let counter = AtomicUsize::new(0);
-                let items =
-                    archives
-                        .par_iter_mut()
-                        .flat_map_iter(|archive| {
-                            grab_counter(&counter, len).map(|index| {
-                                archive
-                        .by_index_raw(index)
-                        .map_err(|err| {
-                            ::log::warn!("could not get file with index {index} in {src:?}\n{err}");
-                            index
-                        })
-                        .map(|zip_file| zip_file.name_raw().conv::<Vec<u8>>())
-                            })
-                        })
-                        .collect::<Vec<_>>();
                 let mut detector = EncodingDetector::new();
-                for item in items {
-                    match item {
-                        Ok(name) => detector.feed(&name, false),
-                        Err(idx) => err_indices.insert(idx),
+                for index in 0..archive.len() {
+                    let file = match archive.by_index_raw(index) {
+                        Ok(file) => file,
+                        Err(err) => {
+                            ::log::warn!("could not get file with index {index} in {src:?}\n{err}");
+                            continue;
+                        }
                     };
+                    detector.feed(file.name_raw(), false);
                 }
                 detector.feed(b"", true);
                 let (encoding, confident) = detector.guess_assess(None, true);
@@ -165,22 +101,9 @@ impl Unzipper {
             }
         };
 
-        let counter = AtomicUsize::new(0);
-        archives.into_par_iter().for_each(|mut archive| {
-            for index in grab_counter(&counter, len) {
-                if err_indices.contains(&index) {
-                    continue;
-                }
-                handle_file(
-                    &mut archive,
-                    index,
-                    encoding,
-                    src,
-                    dest,
-                    password.as_deref(),
-                );
-            }
-        });
+        for index in 0..archive.len() {
+            handle_file(&mut archive, index, encoding, src, dest, *password);
+        }
 
         Ok(())
     }
@@ -188,7 +111,7 @@ impl Unzipper {
 
 /// Handle file in archive.
 fn handle_file(
-    archive: &mut ZipArchive<Cursor<&Mmap>>,
+    archive: &mut ZipArchive<BufReader<File>>,
     index: usize,
     encoding: &'static ::encoding_rs::Encoding,
     src: &Path,

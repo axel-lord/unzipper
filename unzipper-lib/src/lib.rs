@@ -27,6 +27,9 @@ pub enum UnzipError {
     /// Error returned when source file is not a zip archive.
     #[error("file is not a zip archive\n{0}")]
     ReadZip(::zip::result::ZipError),
+    /// Error returned when filename encoding could not be found.
+    #[error("could not determine encoding of filenames")]
+    NoEncoding,
 }
 
 /// Destination to 'extract' files to.
@@ -47,16 +50,63 @@ impl Debug for Destination<'_> {
     }
 }
 
+/// Alias for exact type of zip archives.
+type Archive = ZipArchive<BufReader<File>>;
+
 /// Unzipper configuration.
 #[derive(Clone, Debug, Copy, ::bon::Builder)]
 pub struct Unzipper<'lt> {
     /// Encoding of filenames.
+    #[builder(default = Encoding::Auto)]
     pub encoding: Encoding,
     /// Password to use for files.
     pub password: Option<&'lt [u8]>,
 }
 
 impl<'lt> Unzipper<'lt> {
+    /// Open zip archive at src.
+    fn open_archive(&self, src: &Path) -> Result<Archive, UnzipError> {
+        File::open(src)
+            .map(BufReader::new)
+            .map_err(UnzipError::OpenSrc)?
+            .pipe(ZipArchive::new)
+            .map_err(UnzipError::ReadZip)
+    }
+
+    /// Detect encoding of an archive.
+    fn detect_encoding(
+        &self,
+        archive: &mut Archive,
+        src: &Path,
+    ) -> Option<&'static ::encoding_rs::Encoding> {
+        let mut detector = EncodingDetector::new();
+        for index in 0..archive.len() {
+            let file = match archive.by_index_raw(index) {
+                Ok(file) => file,
+                Err(err) => {
+                    ::log::warn!("could not get file with index {index} in {src:?}\n{err}");
+                    continue;
+                }
+            };
+            detector.feed(file.name_raw(), false);
+        }
+        detector.feed(b"", true);
+        let (encoding, confident) = detector.guess_assess(None, true);
+        confident.then_some(encoding)
+    }
+
+    /// Attempt to find filename encoding of zip file.
+    ///
+    /// # Errors
+    /// On io errors related to reading src.
+    /// Or if src is not a zip file / is malformed.
+    /// Or if encoding cannot be determined [UnzipError::NoEncoding] is returned.
+    pub fn encoding(&self, src: &Path) -> Result<&'static ::encoding_rs::Encoding, UnzipError> {
+        let mut archive = self.open_archive(src)?;
+        self.detect_encoding(&mut archive, src)
+            .ok_or(UnzipError::NoEncoding)
+    }
+
     /// Unzip src into dest.
     ///
     /// # Errors
@@ -66,35 +116,18 @@ impl<'lt> Unzipper<'lt> {
     pub fn unzip(&self, src: &Path, dest: Destination<'_>) -> Result<(), UnzipError> {
         let Self { encoding, password } = self;
 
-        let mut archive = File::open(src)
-            .map(BufReader::new)
-            .map_err(UnzipError::OpenSrc)?
-            .pipe(ZipArchive::new)
-            .map_err(UnzipError::ReadZip)?;
+        let mut archive = self.open_archive(src)?;
 
         let encoding = match encoding {
-            Encoding::Auto => {
-                let mut detector = EncodingDetector::new();
-                for index in 0..archive.len() {
-                    let file = match archive.by_index_raw(index) {
-                        Ok(file) => file,
-                        Err(err) => {
-                            ::log::warn!("could not get file with index {index} in {src:?}\n{err}");
-                            continue;
-                        }
-                    };
-                    detector.feed(file.name_raw(), false);
-                }
-                detector.feed(b"", true);
-                let (encoding, confident) = detector.guess_assess(None, true);
-                if confident {
+            Encoding::Auto => self
+                .detect_encoding(&mut archive, src)
+                .inspect(|encoding| {
                     ::log::info!("using encoding with confidence, {}", encoding.name());
-                    encoding
-                } else {
+                })
+                .unwrap_or_else(|| {
                     ::log::info!("no encoding confidence, using utf-8");
                     ::encoding_rs::UTF_8
-                }
-            }
+                }),
             Encoding::Set(encoding) => {
                 ::log::info!("using set encoding, {}", encoding.name());
                 encoding

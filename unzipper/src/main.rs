@@ -7,7 +7,7 @@ use ::std::{
     thread::available_parallelism,
 };
 
-use ::clap::{CommandFactory, Parser};
+use ::clap::{ArgGroup, CommandFactory, Parser};
 use ::clap_complete::Shell;
 use ::log::LevelFilter;
 use ::mimalloc::MiMalloc;
@@ -15,7 +15,7 @@ use ::rayon::{
     ThreadPoolBuilder,
     iter::{IntoParallelRefIterator, ParallelIterator},
 };
-use ::unzipper_lib::{Destination, Unzipper};
+use ::unzipper_lib::{Destination, UnzipError, Unzipper};
 
 use crate::encoding::{ENCODING_NAMES, Encoding};
 
@@ -45,18 +45,24 @@ fn thread_count() -> NonZero<usize> {
 
 /// Unzip files, with encoding detection.
 #[derive(Debug, Clone, Parser)]
-#[command(author, version, long_about = None)]
+#[command(author, version, long_about = None, group = ArgGroup::new("action"))]
 struct Cli {
     /// Enable verbose logging.
     #[arg(long, short)]
     verbose: bool,
 
     /// List archive contents.
-    #[arg(long, short, visible_alias = "ls")]
+    #[arg(long, short, visible_alias = "ls", requires = "archive")]
     list: bool,
 
-    /// Encoding of file names.
-    #[arg(long, short = 'e', hide_possible_values = true, default_value = "auto")]
+    /// Encoding to use for file names in zip.
+    #[arg(
+        long,
+        short = 'e',
+        hide_possible_values = true,
+        default_value = "auto",
+        requires = "archive"
+    )]
     encoding: Encoding,
 
     /// Where to unpack contents, this has the same behaviour as running
@@ -68,12 +74,16 @@ struct Cli {
     #[arg(long, short, default_value_t = thread_count())]
     threads: NonZero<usize>,
 
+    /// Detect encoding of given archive.
+    #[arg(long, visible_alias = "de", group = "action")]
+    detect_encoding: Option<PathBuf>,
+
     /// List available encodings.
-    #[arg(long, exclusive = true)]
+    #[arg(long, group = "action")]
     list_encodings: bool,
 
     /// Generate completions.
-    #[arg(long, conflicts_with_all = ["at", "list", "archive"])]
+    #[arg(long, group = "action")]
     completions: bool,
 
     /// Shell to use if generating completions.
@@ -81,7 +91,7 @@ struct Cli {
     shell: Shell,
 
     /// Archive/s to unpack.
-    #[arg(required = false)]
+    #[arg(group = "action")]
     archive: Vec<PathBuf>,
 }
 
@@ -91,6 +101,7 @@ fn main() -> ::color_eyre::Result<()> {
         encoding: Encoding(encoding),
         list_encodings,
         completions,
+        detect_encoding,
         shell,
         at,
         list,
@@ -120,6 +131,15 @@ fn main() -> ::color_eyre::Result<()> {
         let mut stdout = io::stdout().lock();
         ::clap_complete::generate(shell, &mut Cli::command(), binary_name(), &mut stdout);
         stdout.flush().expect("flush of stdout should succeed");
+    } else if let Some(src) = detect_encoding {
+        let encoding = Unzipper::builder().build().encoding(&src).or_else(|err| {
+            if let UnzipError::NoEncoding = err {
+                Ok(::encoding_rs::UTF_8)
+            } else {
+                Err(err)
+            }
+        })?;
+        writeln!(io::stdout().lock(), "{}", encoding.name())?;
     } else {
         let unzipper = Unzipper::builder().encoding(encoding).build();
         let write_to_stdout = |name: &Path| {

@@ -9,13 +9,14 @@ use ::std::{
 
 use ::clap::{ArgGroup, CommandFactory, Parser};
 use ::clap_complete::Shell;
+use ::color_eyre::eyre::eyre;
 use ::log::LevelFilter;
 use ::mimalloc::MiMalloc;
 use ::rayon::{
     ThreadPoolBuilder,
     iter::{IntoParallelRefIterator, ParallelIterator},
 };
-use ::unzipper_lib::{Destination, UnzipError, Unzipper};
+use ::unzipper_lib::{UnzipError, Unzipper};
 
 use crate::encoding::{ENCODING_NAMES, Encoding};
 
@@ -144,7 +145,7 @@ fn main() -> ::color_eyre::Result<()> {
         ::clap_complete::generate(shell, &mut Cli::command(), binary_name(), &mut stdout);
         stdout.flush().expect("flush of stdout should succeed");
     } else if let Some(src) = detect_encoding {
-        let encoding = Unzipper::builder().build().encoding(&src).or_else(|err| {
+        let encoding = Unzipper::new().detect_encoding(&src).or_else(|err| {
             if let UnzipError::NoEncoding = err {
                 Ok(::encoding_rs::UTF_8)
             } else {
@@ -153,10 +154,9 @@ fn main() -> ::color_eyre::Result<()> {
         })?;
         writeln!(io::stdout().lock(), "{}", encoding.name())?;
     } else {
-        let unzipper = Unzipper::builder()
+        let unzipper = Unzipper::new()
             .encoding(encoding)
-            .null_terminate(null_terminate)
-            .build();
+            .null_terminate(null_terminate);
 
         if list {
             for archive in archive {
@@ -166,19 +166,24 @@ fn main() -> ::color_eyre::Result<()> {
                 }
             }
         } else {
-            let write_to_stdout = |name: &Path| {
-                _ = writeln!(io::stdout().lock(), "{}", name.display());
-            };
-            let unzip = |src| {
-                let result = unzipper.unzip(
-                    src,
-                    at.as_ref().map_or_else(
-                        || Destination::List(&write_to_stdout),
-                        |dest| Destination::Exdir(dest),
-                    ),
-                );
+            let at = at
+                .map_or_else(::std::env::current_dir, Ok)
+                .map_err(|err| eyre!("could not get current directory").wrap_err(err))?;
+            let unzip = |src: &Path| {
+                let Some(name) = src.file_stem() else {
+                    ::log::error!("could not get filename of {src:?}");
+                    return;
+                };
+                let dest = at.join(name);
+
+                if let Err(err) = ::std::fs::create_dir(&dest) {
+                    ::log::error!("could not create directory {dest:?} for archive {src:?}\n{err}");
+                    return;
+                }
+
+                let result = unzipper.unzip(src, &dest);
                 if let Err(err) = result {
-                    ::log::error!("could not unzip {archive:?}\n{err}");
+                    ::log::error!("could not unzip {archive:?} to {dest:?}\n{err}");
                 }
             };
 

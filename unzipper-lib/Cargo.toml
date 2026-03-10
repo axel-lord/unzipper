@@ -6,7 +6,6 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-bon.workspace = true
 chardetng.workspace = true
 encoding_rs.workspace = true
 log.workspace = true

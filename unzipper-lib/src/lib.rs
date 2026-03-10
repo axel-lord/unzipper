@@ -48,7 +48,7 @@ impl Debug for Destination<'_> {
 }
 
 /// Unzipper configuration.
-#[derive(Debug, Clone, ::bon::Builder)]
+#[derive(Clone, Debug, Copy, ::bon::Builder)]
 pub struct Unzipper<'lt> {
     /// Encoding of filenames.
     pub encoding: Encoding,

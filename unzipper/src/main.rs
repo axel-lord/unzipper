@@ -3,7 +3,7 @@
 use ::core::num::NonZero;
 use ::std::{
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     thread::available_parallelism,
 };
 
@@ -11,7 +11,10 @@ use ::clap::{CommandFactory, Parser};
 use ::clap_complete::Shell;
 use ::log::LevelFilter;
 use ::mimalloc::MiMalloc;
-use ::rayon::ThreadPoolBuilder;
+use ::rayon::{
+    ThreadPoolBuilder,
+    iter::{IntoParallelRefIterator, ParallelIterator},
+};
 use ::unzipper_lib::{Destination, Unzipper};
 
 use crate::encoding::{ENCODING_NAMES, Encoding};
@@ -48,29 +51,29 @@ struct Cli {
     #[arg(long, short)]
     verbose: bool,
 
+    /// List archive contents.
+    #[arg(long, short, visible_alias = "ls")]
+    list: bool,
+
     /// Encoding of file names.
-    #[arg(long, short = 'O', hide_possible_values = true, default_value = "auto")]
+    #[arg(long, short = 'e', hide_possible_values = true, default_value = "auto")]
     encoding: Encoding,
 
-    /// Where to unpack contents, unlike with '-d' this has the same behaviour as running
+    /// Where to unpack contents, this has the same behaviour as running
     /// without a destination while at the given location.
     #[arg(long, requires = "archive")]
     at: Option<PathBuf>,
 
-    /// How many threads should be used.
+    /// Maximum amount of threads to use when extracting multiple files.
     #[arg(long, short, default_value_t = thread_count())]
     threads: NonZero<usize>,
-
-    /// Directory to unpack contents into, will be created if missing.
-    #[arg(long, short = 'd', conflicts_with = "at", requires = "archive")]
-    exdir: Option<PathBuf>,
 
     /// List available encodings.
     #[arg(long, exclusive = true)]
     list_encodings: bool,
 
     /// Generate completions.
-    #[arg(long, conflicts_with_all = ["at", "exdir", "archive"])]
+    #[arg(long, conflicts_with_all = ["at", "list", "archive"])]
     completions: bool,
 
     /// Shell to use if generating completions.
@@ -89,8 +92,8 @@ fn main() -> ::color_eyre::Result<()> {
         list_encodings,
         completions,
         shell,
-        at: _,
-        exdir,
+        at,
+        list,
         archive,
         threads,
     } = Cli::parse();
@@ -118,25 +121,38 @@ fn main() -> ::color_eyre::Result<()> {
         ::clap_complete::generate(shell, &mut Cli::command(), binary_name(), &mut stdout);
         stdout.flush().expect("flush of stdout should succeed");
     } else {
-        ThreadPoolBuilder::new()
-            .thread_name(|idx| format!("unzipper-worker-{idx}"))
-            .num_threads(threads.get())
-            .build_global()?;
         let unzipper = Unzipper::builder().encoding(encoding).build();
-
-        for archive in archive {
-            if let Err(err) = unzipper.unzip(
-                &archive,
-                if let Some(exdir) = &exdir {
-                    Destination::Exdir(exdir)
-                } else {
-                    Destination::List(&|path| {
-                        _ = writeln!(io::stdout().lock(), "{}", path.display());
-                    })
-                },
-            ) {
+        let write_to_stdout = |name: &Path| {
+            _ = writeln!(io::stdout().lock(), "{}", name.display());
+        };
+        let unzip = |src| {
+            let result = unzipper.unzip(
+                src,
+                at.as_ref().map_or_else(
+                    || Destination::List(&write_to_stdout),
+                    |dest| Destination::Exdir(dest),
+                ),
+            );
+            if let Err(err) = result {
                 ::log::error!("could not unzip {archive:?}\n{err}");
-            };
+            }
+        };
+
+        match archive.as_slice() {
+            [] => {
+                ::log::warn!("no archives to unzip");
+            }
+            [archive] => {
+                unzip(archive);
+            }
+            archives => {
+                ThreadPoolBuilder::new()
+                    .thread_name(|idx| format!("unzipper-worker-{idx}"))
+                    .num_threads(threads.get().min(archive.len()))
+                    .build_global()?;
+
+                archives.par_iter().for_each(|path| unzip(path));
+            }
         }
     }
 

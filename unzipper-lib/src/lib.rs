@@ -114,7 +114,41 @@ impl Unzipper<'_> {
     /// Or if src is not a zip file / is malformed.
     pub fn list(&self, src: &Path, write: &mut dyn Write) -> Result {
         let mut file = self.open_file(src)?;
-        let mut archive = self.read_archive(&mut file)?;
+        self.list_archive(src, write, self.read_archive(&mut file)?)
+    }
+
+    /// Unzip src into dest.
+    ///
+    /// # Errors
+    /// On io errors related to reading src.
+    /// Or if src is not a zip file / is malformed.
+    /// Or if dest cannot be created / cannot be written to.
+    pub fn unzip(&self, src: &Path, dest: &Path) -> Result {
+        let mut file = self.open_file(src)?;
+        self.unzip_archive(src, dest, self.read_archive(&mut file)?)
+    }
+}
+
+// Private api/helpers.
+impl Unzipper<'_> {
+    /// Unzip an archive into dest.
+    fn unzip_archive(&self, src: &Path, dest: &Path, mut archive: ZipArchive<Reader>) -> Result {
+        let encoding = self.get_encoding(&mut archive, src);
+
+        for index in 0..archive.len() {
+            self.handle_file(&mut archive, index, encoding, src, dest);
+        }
+
+        Ok(())
+    }
+
+    /// List archive contents.
+    fn list_archive(
+        &self,
+        src: &Path,
+        write: &mut dyn Write,
+        mut archive: ZipArchive<Reader>,
+    ) -> Result {
         let encoding = self.get_encoding(&mut archive, src);
 
         for index in 0..archive.len() {
@@ -144,28 +178,6 @@ impl Unzipper<'_> {
         Ok(())
     }
 
-    /// Unzip src into dest.
-    ///
-    /// # Errors
-    /// On io errors related to reading src.
-    /// Or if src is not a zip file / is malformed.
-    /// Or if dest cannot be created / cannot be written to.
-    pub fn unzip(&self, src: &Path, dest: &Path) -> Result {
-        let mut file = self.open_file(src)?;
-        let mut archive = self.read_archive(&mut file)?;
-
-        let encoding = self.get_encoding(&mut archive, src);
-
-        for index in 0..archive.len() {
-            self.handle_file(&mut archive, index, encoding, src, dest);
-        }
-
-        Ok(())
-    }
-}
-
-// Private api/helpers.
-impl Unzipper<'_> {
     /// Open file at src.
     /// Open zip archive at src.
     fn read_archive<'a>(&self, src: &'a mut dyn ReadSeek) -> Result<ZipArchive<Reader<'a>>> {

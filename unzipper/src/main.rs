@@ -16,7 +16,7 @@ use ::rayon::{
     ThreadPoolBuilder,
     iter::{IntoParallelRefIterator, ParallelIterator},
 };
-use ::unzipper_lib::{UnzipError, Unzipper};
+use ::unzipper_lib::{Progress, UnzipError, Unzipper};
 
 use crate::encoding::{ENCODING_NAMES, Encoding};
 
@@ -91,6 +91,10 @@ struct Cli {
     #[arg(long, requires = "completions", value_enum, default_value_t = default_shell())]
     shell: Shell,
 
+    /// Print progress for indicators.
+    #[arg(long, requires = "archive", conflicts_with = "list")]
+    print_progress: bool,
+
     /// When listing contents terminate with a null character instead of newline.
     #[arg(
         long,
@@ -101,6 +105,11 @@ struct Cli {
         requires = "list"
     )]
     null_terminate: bool,
+
+    /// Chunk size in mib to use when copying file content from archive to filesystem.
+    /// Best used with --print-progress to split up large file extractions.
+    #[arg(long)]
+    chunk_size: Option<u64>,
 
     /// Archive/s to unpack.
     #[arg(group = "action")]
@@ -120,6 +129,8 @@ fn main() -> ::color_eyre::Result<()> {
         list,
         archive,
         threads,
+        print_progress,
+        chunk_size,
     } = Cli::parse();
     ::color_eyre::install()?;
     let level_filter = if verbose {
@@ -157,6 +168,19 @@ fn main() -> ::color_eyre::Result<()> {
         let unzipper = Unzipper::new()
             .encoding(encoding)
             .null_terminate(null_terminate);
+
+        let progress;
+        let unzipper = if print_progress {
+            progress = Progress::new();
+            unzipper.print_progress(&progress)
+        } else {
+            unzipper
+        };
+        let unzipper = if let Some(chunk_size) = chunk_size {
+            unzipper.chunk_size_mib(chunk_size)
+        } else {
+            unzipper
+        };
 
         if list {
             for archive in archive {

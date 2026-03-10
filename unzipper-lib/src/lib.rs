@@ -1,9 +1,9 @@
 //! Library used to unzip zip content.
 
-use ::core::fmt::Debug;
+use ::core::{fmt::Debug, sync::atomic::AtomicU64};
 use ::std::{
     fs::File,
-    io::{BufReader, BufWriter, Write},
+    io::{BufReader, BufWriter, Read, Write},
     path::Path,
 };
 
@@ -11,7 +11,7 @@ use ::bytesize::ByteSize;
 use ::chardetng::EncodingDetector;
 use ::log::log_enabled;
 use ::tap::Pipe;
-use ::zip::ZipArchive;
+use ::zip::{ZipArchive, read::ZipFile};
 
 use crate::dynamic::ReadSeek;
 
@@ -44,6 +44,31 @@ type Reader<'a> = BufReader<&'a mut dyn ReadSeek>;
 /// Crate result type.
 pub type Result<T = (), E = UnzipError> = ::core::result::Result<T, E>;
 
+/// Storage for shared progress indication.
+#[derive(Debug)]
+pub struct Progress {
+    /// Target size to extract.
+    target: AtomicU64,
+    /// Extracted size.
+    completed: AtomicU64,
+}
+
+impl Progress {
+    /// Construct new progress state.
+    pub const fn new() -> Self {
+        Self {
+            target: AtomicU64::new(1),
+            completed: AtomicU64::new(1),
+        }
+    }
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Unzipper configuration.
 #[derive(Clone, Debug, Copy)]
 pub struct Unzipper<'lt> {
@@ -53,6 +78,10 @@ pub struct Unzipper<'lt> {
     pub password: Option<&'lt [u8]>,
     /// Null terminate when listing.
     pub null_terminate: bool,
+    /// Print progress to stdout.
+    pub print_progress: Option<&'lt Progress>,
+    /// Max size of chunks to extract.
+    pub chunk_size: Option<u64>,
 }
 
 impl<'lt> Default for Unzipper<'lt> {
@@ -69,6 +98,8 @@ impl<'lt> Unzipper<'lt> {
             encoding: Encoding::Auto,
             password: None,
             null_terminate: false,
+            print_progress: None,
+            chunk_size: None,
         }
     }
 
@@ -88,9 +119,25 @@ impl<'lt> Unzipper<'lt> {
         }
     }
 
-    /// Set which encoding should be used, default is [Encoding::Auto]
+    /// Should progress be printed to stdout, default is false.
+    pub const fn print_progress(self, progress: &'lt Progress) -> Self {
+        Self {
+            print_progress: Some(progress),
+            ..self
+        }
+    }
+
+    /// Set which encoding should be used, default is [Encoding::Auto].
     pub const fn encoding(self, encoding: Encoding) -> Self {
         Self { encoding, ..self }
+    }
+
+    /// Set chunk size in mib.
+    pub fn chunk_size_mib(self, chunk_size: u64) -> Self {
+        Self {
+            chunk_size: Some(::bytesize::mib(chunk_size)),
+            ..self
+        }
     }
 }
 
@@ -127,6 +174,13 @@ impl Unzipper<'_> {
     /// Or if dest cannot be created / cannot be written to.
     pub fn unzip(&self, src: &Path, dest: &Path) -> Result {
         let mut file = self.open_file(src)?;
+
+        if let Some(Progress { target, .. }) = self.print_progress
+            && let Some(len) = file.metadata().ok().map(|meta| meta.len())
+        {
+            target.fetch_add(len, ::core::sync::atomic::Ordering::Relaxed);
+        }
+
         self.unzip_archive(src, dest, self.read_archive(&mut file)?)
     }
 }
@@ -238,6 +292,38 @@ impl Unzipper<'_> {
         }
     }
 
+    /// Adjust prgress target according to given zip file.
+    fn adjust_progress(&self, zip_file: &ZipFile<Reader>) {
+        if let Some(Progress { target, .. }) = self.print_progress {
+            let size = zip_file.size();
+            let compressed = zip_file.compressed_size();
+
+            if compressed < size {
+                let diff = size - compressed;
+                target.fetch_add(diff, ::core::sync::atomic::Ordering::Relaxed)
+            } else {
+                let diff = compressed - size;
+                target.fetch_sub(diff, ::core::sync::atomic::Ordering::Relaxed)
+            };
+        }
+    }
+
+    /// Get completion percentage.
+    fn get_percentage(&self) -> Option<u64> {
+        let progress = self.print_progress?;
+        let completed = progress
+            .completed
+            .load(::core::sync::atomic::Ordering::Relaxed);
+        let target = progress
+            .target
+            .load(::core::sync::atomic::Ordering::Relaxed);
+
+        let completed = completed * 10;
+        let target = (target / 10).max(1);
+
+        Some(completed / target)
+    }
+
     /// Handle file in archive.
     fn handle_file(
         &self,
@@ -303,8 +389,45 @@ impl Unzipper<'_> {
             );
         }
 
-        if let Err(err) = ::std::io::copy(&mut zip_file, &mut file).and_then(|_| file.flush()) {
-            ::log::error!("could not extract to {path:?}\n{err}");
+        self.adjust_progress(&zip_file);
+
+        if self.print_progress.is_some() {
+            _ = writeln!(
+                ::std::io::stdout().lock(),
+                "#[{}] {decoded}",
+                ByteSize::b(zip_file.size())
+            );
+        }
+
+        if let Some(chunk_size) = self.chunk_size {
+            loop {
+                match ::std::io::copy(&mut zip_file.by_ref().take(chunk_size), &mut file) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        if let Some(Progress { completed, .. }) = self.print_progress {
+                            completed.fetch_add(count, ::core::sync::atomic::Ordering::Relaxed);
+                        }
+
+                        if let Some(percentage) = self.get_percentage() {
+                            _ = writeln!(::std::io::stdout().lock(), "{percentage}")
+                        }
+                    }
+                    Err(err) => {
+                        ::log::error!("could not fully extract to {path:?}\n{err}");
+                        break;
+                    }
+                }
+            }
+        } else {
+            if let Err(err) = ::std::io::copy(&mut zip_file, &mut file).and_then(|_| file.flush()) {
+                ::log::error!("could not extract to {path:?}\n{err}");
+            }
+            if let Some(Progress { completed, .. }) = self.print_progress {
+                completed.fetch_add(zip_file.size(), ::core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        if let Some(percentage) = self.get_percentage() {
+            _ = writeln!(::std::io::stdout().lock(), "{percentage}")
         }
     }
 }

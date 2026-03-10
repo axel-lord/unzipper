@@ -175,6 +175,7 @@ fn main() -> ::color_eyre::Result<()> {
                     return;
                 };
                 let dest = at.join(name);
+                ::log::info!("extracting to {dest:?}");
 
                 if let Err(err) = ::std::fs::create_dir(&dest) {
                     ::log::error!("could not create directory {dest:?} for archive {src:?}\n{err}");

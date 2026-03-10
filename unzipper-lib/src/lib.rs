@@ -7,7 +7,9 @@ use ::std::{
     path::Path,
 };
 
+use ::bytesize::ByteSize;
 use ::chardetng::EncodingDetector;
+use ::log::log_enabled;
 use ::tap::Pipe;
 use ::zip::ZipArchive;
 
@@ -293,6 +295,13 @@ impl Unzipper<'_> {
                 return;
             }
         };
+
+        if log_enabled!(::log::Level::Info) {
+            ::log::info!(
+                "extracting {path:?} [{}]",
+                ByteSize::b(zip_file.size()).display()
+            );
+        }
 
         if let Err(err) = ::std::io::copy(&mut zip_file, &mut file).and_then(|_| file.flush()) {
             ::log::error!("could not extract to {path:?}\n{err}");

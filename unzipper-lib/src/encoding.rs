@@ -108,7 +108,7 @@ impl TryFrom<&[u8]> for Encoding {
         if value.eq_ignore_ascii_case(b"auto") {
             Ok(Self::Auto)
         } else {
-            ::encoding_rs::Encoding::for_label(value)
+            ::encoding_rs::Encoding::for_label_no_replacement(value)
                 .map(Self::Set)
                 .ok_or(EncodingFromStrError)
         }

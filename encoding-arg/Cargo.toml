@@ -1,0 +1,14 @@
+[package]
+name = "encoding-arg"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+clap.workspace = true
+encoding_rs.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

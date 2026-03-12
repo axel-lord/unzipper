@@ -10,21 +10,18 @@ use ::std::{
 use ::clap::{ArgGroup, CommandFactory, Parser};
 use ::clap_complete::Shell;
 use ::color_eyre::eyre::eyre;
+use ::encoding_arg::{ENCODING_NAMES, EncodingArg};
 use ::log::LevelFilter;
 use ::mimalloc::MiMalloc;
 use ::rayon::{
     ThreadPoolBuilder,
     iter::{IntoParallelRefIterator, ParallelIterator},
 };
-use ::unzipper_lib::{Progress, UnzipError, Unzipper};
-
-use crate::encoding::{ENCODING_NAMES, Encoding};
+use ::unzipper_lib::{Encoding, Progress, UnzipError, Unzipper};
 
 /// Global allocator is mimalloc
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
-
-mod encoding;
 
 /// Get default shell
 fn default_shell() -> Shell {
@@ -61,10 +58,10 @@ struct Cli {
         long,
         short = 'e',
         hide_possible_values = true,
-        default_value = "auto",
+        default_value_t = EncodingArg::Auto,
         requires = "archive"
     )]
-    encoding: Encoding,
+    encoding: EncodingArg,
 
     /// Where to unpack contents, this has the same behaviour as running
     /// without a destination while at the given location.
@@ -119,7 +116,7 @@ struct Cli {
 fn main() -> ::color_eyre::Result<()> {
     let Cli {
         verbose,
-        encoding: Encoding(encoding),
+        encoding,
         list_encodings,
         completions,
         detect_encoding,
@@ -143,6 +140,7 @@ fn main() -> ::color_eyre::Result<()> {
         .filter_module("unzipper_lib", level_filter)
         .init();
 
+    let encoding = encoding.encoding().map_or(Encoding::Auto, Encoding::Set);
     if list_encodings {
         let mut stdout = io::stdout().lock();
         for i in ENCODING_NAMES.iter() {

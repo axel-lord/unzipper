@@ -9,6 +9,7 @@ license.workspace = true
 clap = { workspace = true, features = ["derive", "string"] }
 clap_complete.workspace = true
 color-eyre.workspace = true
+encoding-arg.workspace = true
 encoding_rs.workspace = true
 env_logger.workspace = true
 log.workspace = true

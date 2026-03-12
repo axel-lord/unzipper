@@ -1,0 +1,18 @@
+[package]
+name = "encat"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+bytesize.workspace = true
+chardetng.workspace = true
+clap = { workspace = true, features = ["derive"] }
+encoding-arg.workspace = true
+encoding_rs.workspace = true
+mimalloc.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

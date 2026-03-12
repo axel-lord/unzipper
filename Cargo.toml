@@ -1,5 +1,5 @@
 [workspace]
-members = ["encoding-arg",
+members = ["encat","encoding-arg",
 	"unzipper", 
 	"unzipper-lib"
 ]
